@@ -26,6 +26,17 @@ function sendState(conn){if(conn.open)conn.send({type:'state',sharing:!!stream})
 function broadcast(){for(const {conn} of viewers.values())sendState(conn);}
 function attachCall(entry){if(!stream||!entry.conn.open)return;entry.call?.close();entry.call=peer.call(entry.conn.peer,stream,{metadata:{key:secret}});entry.call?.on('error',()=>status('A viewer’s video connection failed. They can leave and rejoin.'));}
 function stopShare(){const old=stream;stream=null;old?.getTracks().forEach(t=>t.stop());for(const e of viewers.values()){e.call?.close();e.call=null;}$('video').srcObject=null;$('empty').hidden=false;$('stop').hidden=true;$('share').disabled=!ready;broadcast();status('Sharing stopped. The room is still open.');}
+function inspectConnection(conn){
+ const pc=conn.peerConnection;
+ if(!pc)return;
+ const report=()=>console.info('Watch connection',JSON.stringify({role:guest?'guest':'host',signaling:pc.signalingState,ice:pc.iceConnectionState,gathering:pc.iceGatheringState,connection:pc.connectionState}));
+ report();
+ pc.addEventListener('iceconnectionstatechange',report);
+ pc.addEventListener('icegatheringstatechange',report);
+ pc.addEventListener('signalingstatechange',report);
+ pc.addEventListener('icecandidate',e=>{if(e.candidate)console.info('Watch candidate',e.candidate.type,e.candidate.protocol);});
+ pc.addEventListener('icecandidateerror',e=>console.warn('Watch ICE server error',e.errorCode));
+}
 function setupPeer(){
  if(typeof Peer==='undefined'){status('Connection library could not load. Reload to retry.');return false;}
  peer=new Peer();
@@ -37,6 +48,7 @@ function setupPeer(){
  });
  peer.on('connection',conn=>{
   if(guest){conn.close();return;}
+  inspectConnection(conn);
   let authenticated=false;
   const timer=setTimeout(()=>{if(!authenticated)conn.close();},30000);
   conn.on('data',data=>{
@@ -80,6 +92,7 @@ $('join').onclick=()=>{
   if(current!==attempt||hostLink)return;
   status('Connecting to host…');
   const conn=hostLink=peer.connect(room,{reliable:true,serialization:'json'});
+  inspectConnection(conn);
   const hello=()=>{if(current===attempt&&conn.open)conn.send({type:'join',key:token});};
   conn.on('open',()=>{if(current!==attempt)return;status('Waiting for host confirmation…');hello();helloInterval=setInterval(hello,1000);});
   conn.on('data',data=>{
