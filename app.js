@@ -4,6 +4,19 @@ const params=new URLSearchParams(location.hash.slice(1));
 const room=params.get('room'), token=params.get('key');
 const guest=Boolean(room);
 let peer,stream,hostLink,remoteCall,secret,ready=false,joining=false;
+// Join lifecycle v2: keep deadlines active until the host acknowledges.
+let joinDeadline, helloInterval, mediaDeadline, attempt=0;
+function clearJoinTimers(){clearTimeout(joinDeadline);clearInterval(helloInterval);clearTimeout(mediaDeadline);}
+function failJoin(message){
+ attempt++;clearJoinTimers();joining=false;
+ const old=peer;peer=null;remoteCall=null;hostLink=null;old?.destroy();
+ $('video').srcObject=null;$('empty').hidden=false;
+ $('join').disabled=false;$('join').textContent='Retry joining';status(message);
+}
+function expectMedia(){
+ clearTimeout(mediaDeadline);
+ mediaDeadline=setTimeout(()=>failJoin('Connected to the host, but video could not connect. Retry joining; if it repeats, try another network.'),25000);
+}
 const viewers=new Map();
 const status=text=>{$('status').textContent=text;};
 const showVideo=()=>{$('empty').hidden=true;};
@@ -16,26 +29,36 @@ function stopShare(){const old=stream;stream=null;old?.getTracks().forEach(t=>t.
 function setupPeer(){
  if(typeof Peer==='undefined'){status('Connection library could not load. Reload to retry.');return false;}
  peer=new Peer();
- peer.on('error',err=>{status(err.type==='peer-unavailable'?'Host not found. Ask for a fresh invite.':`Connection failed (${err.type||'network'}). Leave and retry; some networks block direct video connections.`);});
- peer.on('disconnected',()=>{ready=false;$('share').disabled=true;status('Room service disconnected. Leave and create or join a new room.');});
+ peer.on('error',err=>{(guest?failJoin:status)(err.type==='peer-unavailable'?'Host not found. Ask for a fresh invite.':`Connection failed (${err.type||'network'}). Leave and retry; some networks block direct video connections.`);});
+ peer.on('disconnected',()=>{
+  if(guest){failJoin('Room service disconnected. Retry joining.');return;}
+  ready=false;$('share').disabled=true;status('Reconnecting the room service…');
+  if(peer&&!peer.destroyed)peer.reconnect();
+ });
  peer.on('connection',conn=>{
   if(guest){conn.close();return;}
   let authenticated=false;
-  const timer=setTimeout(()=>{if(!authenticated)conn.close();},10000);
+  const timer=setTimeout(()=>{if(!authenticated)conn.close();},30000);
   conn.on('data',data=>{
-   if(authenticated)return;
-   if(!data||data.type!=='join'||data.key!==secret||viewers.size>=4){conn.close();return;}
+   if(authenticated){if(data?.type==='join')sendState(conn);return;}
+   if(!data||data.type!=='join')return;
+   if(data.key!==secret||viewers.size>=4){
+    if(conn.open)conn.send({type:'rejected',reason:data.key!==secret?'This invite has expired. Ask for a new link.':'This room is full (four viewers).'});
+    setTimeout(()=>conn.close(),500);return;
+   }
    authenticated=true;clearTimeout(timer);const entry={conn,call:null};viewers.set(conn.peer,entry);sendState(conn);attachCall(entry);count();
   });
   const cleanup=()=>{clearTimeout(timer);const entry=viewers.get(conn.peer);if(entry?.conn===conn){entry.call?.close();viewers.delete(conn.peer);count();}};
   conn.on('close',cleanup);conn.on('error',cleanup);
+  conn.on('open',()=>{if(authenticated){sendState(conn);attachCall(viewers.get(conn.peer));}});
  });
  peer.on('call',call=>{
   if(!guest||call.peer!==room||call.metadata?.key!==token){call.close();return;}
-  remoteCall?.close();remoteCall=call;call.answer();
-  call.on('stream',s=>{$('video').srcObject=s;showVideo();$('video').play().catch(()=>{$('sound').hidden=false;});status('Watching the host’s tab.');});
+  const previous=remoteCall;remoteCall=call;previous?.close();
+  call.on('stream',s=>{clearTimeout(mediaDeadline);$('video').muted=true;$('sound').hidden=false;$('video').srcObject=s;showVideo();$('video').play().catch(()=>{$('sound').hidden=false;});status('Watching the host’s tab.');});
   call.on('close',()=>{if(remoteCall===call){$('video').srcObject=null;$('empty').hidden=false;status('Waiting for the host to share.');}});
-  call.on('error',()=>status('Video connection failed. Leave and rejoin.'));
+  call.on('error',()=>failJoin('Video connection failed. Retry joining.'));
+  call.answer();
  });return true;
 }
 $('hostControls').hidden=guest;$('guestControls').hidden=!guest;$('role').textContent=guest?'GUEST':'WATCH ROOM';
@@ -47,9 +70,36 @@ $('host').onclick=()=>{
  peer.on('open',id=>{ready=true;$('role').textContent='HOST';const url=new URL(location.href);url.hash=new URLSearchParams({room:id,key:secret}).toString();$('invite').value=url.href;$('inviteBox').hidden=false;$('share').disabled=false;status(notice());});
 };
 $('join').onclick=()=>{
- if(joining)return;if(!setupPeer())return;joining=true;$('join').disabled=true;$('leave').hidden=false;status('Connecting to host…');
- const timeout=setTimeout(()=>status('Still connecting. Check the host is online; your network may block peer connections.'),15000);
- peer.on('open',()=>{hostLink=peer.connect(room,{reliable:true});hostLink.on('open',()=>{clearTimeout(timeout);hostLink.send({type:'join',key:token});});hostLink.on('data',data=>{if(data?.type==='state'){status(data.sharing?'Receiving the host’s tab…':'Connected. Waiting for the host to share.');if(!data.sharing){$('video').srcObject=null;$('empty').hidden=false;}}});hostLink.on('close',()=>{clearTimeout(timeout);remoteCall?.close();$('video').srcObject=null;$('empty').hidden=false;status('Host ended the room or the connection was lost. Leave and rejoin to retry.');});hostLink.on('error',()=>status('Could not join. Leave and retry.'));});
+ if(joining)return;
+ clearJoinTimers();const current=++attempt;
+ joining=true;$('join').disabled=true;$('join').textContent='Joining…';$('leave').hidden=false;
+ status('Connecting to room service…');
+ if(!setupPeer()){joining=false;$('join').disabled=false;$('join').textContent='Retry joining';return;}
+ joinDeadline=setTimeout(()=>{if(current===attempt)failJoin('Host did not confirm entry. Retry joining, or ask the host to refresh and send a new invite.');},30000);
+ peer.on('open',()=>{
+  if(current!==attempt||hostLink)return;
+  status('Connecting to host…');
+  const conn=hostLink=peer.connect(room,{reliable:true,serialization:'json'});
+  const hello=()=>{if(current===attempt&&conn.open)conn.send({type:'join',key:token});};
+  conn.on('open',()=>{if(current!==attempt)return;status('Waiting for host confirmation…');hello();helloInterval=setInterval(hello,1000);});
+  conn.on('data',data=>{
+   if(current!==attempt)return;
+   if(data?.type==='rejected'){failJoin(data.reason);return;}
+   if(data?.type!=='state')return;
+   clearTimeout(joinDeadline);clearInterval(helloInterval);
+   $('join').textContent='Joined';
+   if(data.sharing){
+    if(!$('video').srcObject){status('Connected. Receiving the host’s tab…');expectMedia();}
+   }else{
+    clearTimeout(mediaDeadline);$('video').srcObject=null;$('empty').hidden=false;
+    $('empty').querySelector('h1').textContent='You’re in.';
+    $('empty').querySelector('p').textContent='Waiting for the host to share their Aether tab.';
+    status('Connected. Waiting for the host to share.');
+   }
+  });
+  conn.on('close',()=>{if(current===attempt)failJoin('Connection to host lost. Retry joining or ask for a new invite.');});
+  conn.on('error',()=>{if(current===attempt)failJoin('Could not connect to host. Retry joining.');});
+ });
 };
 $('share').onclick=async()=>{
  if(!ready||guest)return;
