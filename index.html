@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Aether Together</title><link rel="stylesheet" href="style.css"><script defer src="vendor/peerjs.min.js"></script><script defer src="app.js"></script></head>
+<body><main><header><div class="brand">aether<span>together</span></div><span id="role">WATCH ROOM</span></header>
+<section class="screen"><video id="video" autoplay playsinline></video><div id="empty"><span class="eyebrow">SAME TAB. SAME MOMENT.</span><h1>Bring someone along.</h1><p>Host a room, share your Aether tab, and send an invite.</p></div></section>
+<div class="bar"><p id="status" role="status" aria-live="polite">Ready when you are.</p><span id="count"></span><button id="sound" hidden>Enable sound</button><button id="full">Fullscreen</button></div>
+<section class="controls"><div id="hostControls"><div class="actions"><button id="host" class="primary">Create room</button><a href="https://aether.ist" target="_blank" rel="noopener noreferrer">Open Aether ↗</a><button id="share" disabled>Share Aether tab</button><button id="stop" hidden>Stop sharing</button></div><p class="help">Use desktop Chrome or Edge to host. Select the Aether tab and enable “Share tab audio.” Keep this room open.</p></div>
+<div id="guestControls" hidden><button id="join" class="primary">Join room</button><p class="help">The host controls playback on their tab. Your volume stays yours.</p></div>
+<div id="inviteBox" hidden><label for="invite">Invite link</label><div class="invite"><input id="invite" readonly><button id="copy">Copy invite</button></div></div>
+<button id="leave" hidden>Leave room</button></section><footer>Live tab sharing · Small streaming delay · No recording</footer></main></body></html>
